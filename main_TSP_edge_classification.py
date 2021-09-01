@@ -38,6 +38,11 @@ class DotDict(dict):
 
 
 
+torch.cuda.is_available() #problems with CUDA
+
+
+
+
 """
     IMPORTING CUSTOM MODULES/METHODS
 """

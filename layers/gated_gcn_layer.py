@@ -76,7 +76,7 @@ class GatedGCNLayer(nn.Module):
                                              self.in_channels,
                                              self.out_channels)
 
-    
+
 ##############################################################
 #
 # Additional layers for edge feature/representation analysis
