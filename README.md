@@ -1,100 +1,119 @@
+# README OF THE FORK
 
+This fork shifts the focus on the TSP problem, which is framed as a binary classification problem on each edge of the graph. 
+It also adds a smaller TSP dataset (30 to 50 nodes) for faster experimentation. 
 
-# Benchmarking Graph Neural Networks
+The dataset contains 10000 train, 1000 val, 1000 test samples. Each set was generated using the script `data/TSP/generate_TSP.py` using seeds 17,18,19 respectively. 
 
-<br>
+The objective of the experiments carried out here is to understand whether an **Informed Machine Learning** approach, using external knowledge coming from a Belief Propagation approximation of minimum-weight 2-matching can be helpful in improving sample and learning efficiency of a baseline non-informed GNN model.
 
-## Updates
+### Create and activate environment
 
-**Nov 2, 2020**
-* Project based on DGL 0.4.2. See the relevant dependencies defined in the environment yml files ([CPU](./environment_cpu.yml), [GPU](./environment_gpu.yml)).
-	+ Numerical experiments report faster training times with DGL 0.4.2 compared to DGL 0.5.2.
-	+ For the version of the project compatible with DGL 0.5.2 and relevant dependencies, please use this [branch](https://github.com/graphdeeplearning/benchmarking-gnns/tree/master-dgl-0.5.2).
- * Added [ZINC-full](./data/script_download_molecules.sh) dataset (249K molecular graphs) with [scripts](./scripts/ZINC-full/).
+After cloning this repository:
 
-
-**Jun 11, 2020**
-* Second release of the project. Major updates : 
-	+ Added experimental pipeline for Weisfeiler-Lehman-GNNs operating on dense rank-2 tensors.
-	+ Added a leaderboard for all datasets.
-	+ Updated PATTERN dataset.
-	+ Fixed bug for PATTERN and CLUSTER accuracy.
-	+ Moved first release to this [branch](https://github.com/graphdeeplearning/benchmarking-gnns/tree/arXivV1).
-* New ArXiv's version of the [paper](https://arxiv.org/pdf/2003.00982.pdf).
-
-
-**Mar 3, 2020**
-* First release of the project.
-
-
-
-<br>
-
-<img src="./docs/gnns.jpg" align="right" width="350"/>
-
-
-## 1. Benchmark installation
-
-[Follow these instructions](./docs/01_benchmark_installation.md) to install the benchmark and setup the environment.
-
-
-<br>
-
-## 2. Download datasets
-
-[Proceed as follows](./docs/02_download_datasets.md) to download the benchmark datasets.
-
-
-<br>
-
-## 3. Reproducibility 
-
-[Use this page](./docs/03_run_codes.md) to run the codes and reproduce the published results.
-
-
-<br>
-
-## 4. Adding a new dataset 
-
-[Instructions](./docs/04_add_dataset.md) to add a dataset to the benchmark.
-
-
-<br>
-
-## 5. Adding a Message-passing GCN
-
-[Step-by-step directions](./docs/05_add_mpgcn.md) to add a MP-GCN to the benchmark.
-
-
-<br>
-
-## 6. Adding a Weisfeiler-Lehman GNN
-
-[Step-by-step directions](./docs/06_add_wlgnn.md) to add a WL-GNN to the benchmark.
-
-
-<br>
-
-## 7. Leaderboards
-
-[Leaderboards](./docs/07_leaderboards.md) of GNN models on each dataset. [Instructions](./docs/07_contribute_leaderboards.md) to contribute to leaderboards.
-
-
-<br>
-
-## 8. Reference 
-
-[ArXiv's paper](https://arxiv.org/pdf/2003.00982.pdf)
+To run project with GPU (CUDA):
 ```
-@article{dwivedi2020benchmarkgnns,
-  title={Benchmarking Graph Neural Networks},
-  author={Dwivedi, Vijay Prakash and Joshi, Chaitanya K and Laurent, Thomas and Bengio, Yoshua and Bresson, Xavier},
-  journal={arXiv preprint arXiv:2003.00982},
-  year={2020}
-}
+# At the root of the project
+conda env create -f deeptsp.yml -n deeptsp
+conda activate deeptsp
+```
+
+This environment is the updated version of the original repo's `environment_gpu.yml.` It uses the most recent stable versions of the required packages available for conda 4.8.3
+
+### Running experiments:
+
+All experiments rely on the file `experiments_TSP.py`, which you can find in the root directory.
+
+To download the data:
+```
+# At the root of the project
+cd data/TSP
+bash download-data.sh
 ```
 
 
+#### 1. Training size
 
-<br><br><br>
+Experiments are carried out using the GatedGCN model and the configuration file `TSP_edge_classification_GatedGCN_100k.json`.
+
+First, ensure you have created the training, validation and test dataset using `prepare_TSP.py`. At this point, you must decide whether you want to use the the information coming from the minimum-weight perfect 2-matching predictions, obtained by belief propagation, as edge features in the input layer (*BP-enhanced model*) or only at the last stage of the MLP readout (*hybrid model*). 
+
+##### Benchmark model
+```
+# At the root of the project
+cd data/TSP
+# 1. Create the dataset:
+python  prepare_TSP.py 
+#At the root of the project
+# 2. Run the model at different training sizes
+bash run-benchmark.sh
+```
+
+
+##### BP-enhanced model
+```
+# At the root of the project
+cd data/TSP
+# 1. Create the dataset:
+python  prepare_TSP.py -bp BP/BPmatch_damp_bayati -m 1
+#At the root of the project
+# 2. Run the model at different training sizes
+bash run-bp.sh 
+```
+
+##### Hybrid model
+```
+# At the root of the project
+cd data/TSP
+# 1. Create the hybrid dataset:
+python  prepare_TSP.py -bp BP/BPmatch_damp_bayati -hy 1
+#At the root of the project
+# 2. Run the model at different training sizes
+bash run-hybrid.sh 
+```
+
+Note that it is possible to run the benchmark model on the hybrid dataset, without the need to create a separate one: the base model will simply ignore the BP features. Only the hybrid model will use them in the readout. 
+
+#### 2. Graph size
+
+```
+# At the root of the project
+cd data/TSP
+# create the hybrid dataset, if not created yet
+# Split based on graph sizes
+python chunk_TSP_data.py  
+```
+
+```
+#At the root of the project
+bash run-chunks.sh 
+```
+
+#### 3. Generalization
+
+Training and validating on graph sizes 30-40, testing on graph sizes 41-50. 
+
+```
+# At the root of the project
+cd data/TSP
+# create the hybrid dataset, if not created yet
+# Split so that test data has larger-sized graphs
+python generalization_data.py  
+```
+
+```
+#At the root of the project
+bash run-generalization.sh 
+```
+
+
+Experiment results will be available as csv files in the `experiment_results` directory. Results for runs of the base model, either with or without BP features, and for the hybrid model will be available in separate csv files organised by initalisation seed (of the sort: `base_model_seedXX.csv` and `hybrid_model_seedXX.csv`), with details about training set size, graph size, running time and performance. More detailed history of any model runs,  will be stored in an `out` directory. 
+
+The plots available in  the directory `plots` can be reproduced by running:
+```
+# At the root of the project
+python plot_results.py  
+```
+
+All experiments in the end project were carried out with three different seeds: 40, 41, 42. The default seed is set to 41, but it can be changed by simply modifying the corresponding line in each of the bash scripts. 
 
