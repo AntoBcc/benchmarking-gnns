@@ -1,11 +1,17 @@
-# README OF THE FORK
+# Informed Machine Learning for the Travelling Salesman Problem: Graph Neural Network (Part 2)
+
+*This work is geared towards a MSc research thesis, for the MSc in Data Science and Business Analytics ([DSBA](http://www.unibocconi.eu/wps/wcm/connect/bocconi/sitopubblico_en/navigation+tree/home/programs/master+of+science/data+science+and+business+analytics)) at Bocconi University. It has been developed with the support and supervision of prof. [CarloLucibello](https://github.com/CarloLucibello).*
+
+
+#####  README OF THE FORK
 
 This fork shifts the focus on the TSP problem, which is framed as a binary classification problem on each edge of the graph. 
 It also adds a smaller TSP dataset (30 to 50 nodes) for faster experimentation. 
 
+
 The dataset contains 10000 train, 1000 val, 1000 test samples. Each set was generated using the script `data/TSP/generate_TSP.py` using seeds 17,18,19 respectively. 
 
-The objective of the experiments carried out here is to understand whether an **Informed Machine Learning** approach, using external knowledge coming from a Belief Propagation approximation of minimum-weight 2-matching can be helpful in improving sample and learning efficiency of a baseline non-informed GNN model.
+The objective of the experiments carried out here is to understand whether an **Informed Machine Learning** approach, using external knowledge coming from a Belief Propagation approximation of minimum-weight 2-matching can be helpful in improving *sample efficiency*and *learning efficiency* of a baseline non-informed GNN model.
 
 ### Create and activate environment
 
@@ -109,11 +115,10 @@ bash run-generalization.sh
 
 Experiment results will be available as csv files in the `experiment_results` directory. Results for runs of the base model, either with or without BP features, and for the hybrid model will be available in separate csv files organised by initalisation seed (of the sort: `base_model_seedXX.csv` and `hybrid_model_seedXX.csv`), with details about training set size, graph size, running time and performance. More detailed history of any model runs,  will be stored in an `out` directory. 
 
-The plots available in  the directory `plots` can be reproduced by running:
+The plots available in the directory `plots` can be reproduced by running:
 ```
 # At the root of the project
 python plot_results.py  
 ```
 
 All experiments in the end project were carried out with three different seeds: 40, 41, 42. The default seed is set to 41, but it can be changed by simply modifying the corresponding line in each of the bash scripts. 
-

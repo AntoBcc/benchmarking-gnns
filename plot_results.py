@@ -41,14 +41,14 @@ def f1_plots(df,variation, dataset,inset=False,vizdir='plots'):
         title = ax.set_title(f'Gated-GCN vs {v_label} : {dataset} (generalization) - TEST F1',y=0.92, backgroundcolor='0.9')
 
     if inset: 
-        axins = inset_axes(ax,4.5,2.5, loc=2,bbox_to_anchor=(0.45,0.62),bbox_transform=ax.figure.transFigure)
+        axins = inset_axes(ax,4,2, loc=2,bbox_to_anchor=(0.4,0.55),bbox_transform=ax.figure.transFigure)
 
         axins.plot(v['size'],v['mean'],color=v_color)
         axins.plot(b['size'],b['mean'],color='midnightblue')
-        axins.fill_between(v['size'], v['mean'] - v['std'], v['mean'] + v['std'], alpha=0.85,label=v_label,color=v_color)
-        axins.fill_between(b['size'], b['mean'] - b['std'], b['mean'] + b['std'], alpha=0.85,label='Gated-GCN',color='midnightblue')
+        axins.fill_between(v['size'], v['mean'] - v['std'], v['mean'] + v['std'], alpha=0.5,label=v_label,color=v_color)
+        axins.fill_between(b['size'], b['mean'] - b['std'], b['mean'] + b['std'], alpha=0.5,label='Gated-GCN',color='midnightblue')
         axins.set_ylim(0.45,0.8)
-        axins.set_xlim(1,1400)
+        axins.set_xlim(1,500)
         axins.set_yticks([i for i in np.arange(start=0.45, stop=0.8, step=0.1)])
         axins.legend(loc=3)
 
@@ -126,12 +126,12 @@ def main():
     f1_plots(df,'bp_edge_features','tsp30-50',inset=True)
     f1_plots(df,'hybrid','tsp30-50',inset=True)
 
-    f1_plots(df,'hybrid','tsp30-35')
-    f1_plots(df,'hybrid','tsp36-40')
-    f1_plots(df,'hybrid','tsp41-45')
-    f1_plots(df,'hybrid','tsp46-50')
+    f1_plots(df,'hybrid','tsp30-35',inset=True)
+    f1_plots(df,'hybrid','tsp36-40',inset=True)
+    f1_plots(df,'hybrid','tsp41-45',inset=True)
+    f1_plots(df,'hybrid','tsp46-50',inset=True)
 
-    f1_plots(df,'hybrid','tsp30-40')
+    f1_plots(df,'hybrid','tsp30-40',inset=True)
 
     epoch_plots(df,'bp_edge_features','tsp30-50')
     epoch_plots(df,'hybrid','tsp30-50')
