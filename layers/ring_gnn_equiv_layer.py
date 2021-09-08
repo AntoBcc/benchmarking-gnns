@@ -161,7 +161,7 @@ def ops_2_to_2(inputs, dim, normalization='inf', normalization_val=1.0): # N x D
 
     if normalization is not None:
         float_dim = float(dim)
-        if normalization is 'inf':
+        if normalization == 'inf':
             op2 = torch.div(op2, float_dim)
             op3 = torch.div(op3, float_dim)
             op4 = torch.div(op4, float_dim)

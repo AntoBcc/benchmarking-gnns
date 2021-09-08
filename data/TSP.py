@@ -10,13 +10,18 @@ from torch.utils.data import Dataset
 
 
 class TSP(Dataset):
-    def __init__(self, data_dir, split="train", num_neighbors=25, max_samples=10000):    
+    def __init__(self, name, data_dir, match_dir, split="train", num_neighbors=25, max_samples=10000, use_matching=False, hybrid = False):    
         self.data_dir = data_dir
         self.split = split
-        self.filename = f'{data_dir}/tsp50-500_{split}.txt'
+        self.name = name 
+        self.filename = f'{data_dir}/{name}_{split}.txt'
+        self.match_dir = match_dir
+        self.matchfile = f'{match_dir}/{name}_{split}_match.pt'
         self.max_samples = max_samples
         self.num_neighbors = num_neighbors
         self.is_test = split.lower() in ['test', 'val']
+        self.use_matching = use_matching 
+        self.hybrid = hybrid
         
         self.graph_lists = []
         self.edge_labels = []
@@ -27,10 +32,21 @@ class TSP(Dataset):
         print('preparing all graphs for the %s set...' % self.split.upper())
         
         file_data = open(self.filename, "r").readlines()[:self.max_samples]
+
+        #if using, extract 2 matching predictions from BP
+        bp_dir = 'bp_matching'
+        if self.use_matching or self.hybrid:
+            matching_data = torch.load(self.matchfile)
+            #read as list of arrays (to be edited)
+            matching_data = [matching_data[i].detach().numpy() for i in range(len(matching_data))] 
         
         for graph_idx, line in enumerate(file_data):
             line = line.split(" ")  # Split into list
             num_nodes = int(line.index('output')//2)
+
+            #get matching
+            if self.use_matching or self.hybrid:
+                matching = matching_data[graph_idx]
             
             # Convert node coordinates to required format
             nodes_coord = []
@@ -56,29 +72,58 @@ class TSP(Dataset):
             # Add final connection of tour in edge target
             edges_target[j][tour_nodes[0]] = 1
             edges_target[tour_nodes[0]][j] = 1
+                
+            if self.use_matching or self.hybrid:
+                assert matching.shape == edges_target.shape == W_val.shape
             
             # Construct the DGL graph
-            g = dgl.DGLGraph()
-            g.add_nodes(num_nodes)
+            g = dgl.graph(([], []), num_nodes=num_nodes)
             g.ndata['feat'] = torch.Tensor(nodes_coord)
             
             edge_feats = []  # edge features i.e. euclidean distances between nodes
+            edge_feats_bp = [] # BP matching results as edge features
+            eBP = [] # BP matching results for the hybrid GNN model
             edge_labels = []  # edges_targets as a list
             # Important!: order of edge_labels must be the same as the order of edges in DGLGraph g
             # We ensure this by adding them together
             for idx in range(num_nodes):
                 for n_idx in knns[idx]:
-                    if n_idx != idx:  # No self-connection
-                        g.add_edge(idx, n_idx)
+                    if n_idx > idx:  # No self-connection
+                        g.add_edges(idx, n_idx)
                         edge_feats.append(W_val[idx][n_idx])
+                        
+                        if self.use_matching:
+                            edge_feats_bp.append(matching[idx][n_idx])
+                        if self.hybrid:
+                            eBP.append([0.,1.]) if matching[idx][n_idx] else eBP.append([1.,0.])
+                        
                         edge_labels.append(int(edges_target[idx][n_idx]))
             # dgl.transform.remove_self_loop(g)
             
-            # Sanity check
+            # add reverse edges
+            u, v = g.edges()
+            g.add_edges(v, u)
+            
+            edge_feats += edge_feats
+            edge_feats_bp += edge_feats_bp
+            eBP += eBP 
+            edge_labels += edge_labels
+            
+            # Sanity checks
             assert len(edge_feats) == g.number_of_edges() == len(edge_labels)
+            if self.use_matching:
+                assert len(edge_feats) == len(edge_feats_bp)
+            if self.hybrid:
+                assert len(edge_feats) == len(eBP)
             
             # Add edge features
-            g.edata['feat'] = torch.Tensor(edge_feats).unsqueeze(-1)
+            if self.use_matching:
+                g.edata['feat'] = torch.stack([torch.Tensor(edge_feats),torch.Tensor(edge_feats_bp)],dim=1)
+            else:
+                g.edata['feat'] = torch.Tensor(edge_feats).unsqueeze(-1)
+                
+            if self.hybrid:
+                g.edata['eBP'] = torch.Tensor(eBP)
             
             # # Uncomment to add dummy edge features instead (for Residual Gated ConvNet)
             # edge_feat_dim = g.ndata['feat'].shape[1] # dim same as node feature dim
@@ -105,14 +150,39 @@ class TSP(Dataset):
                 And a list of labels for each edge in the DGLGraph.
         """
         return self.graph_lists[idx], self.edge_labels[idx]
+    
+    def subsample(self,sample_size):
+        """
+        subsample the dataset, by only taking the first instances up to sample_size
+        -------
+        idx : int > 0
+             The number of samples
+        Returns
+        ------
+        list of (dgl.DGLGraph, list) tuples
+        """
+        return [(i,j) for i,j in zip(self.graph_lists[:sample_size], self.edge_labels[:sample_size])]
+        
+   
+   
 
 
 class TSPDatasetDGL(Dataset):
-    def __init__(self, name):
+    def __init__(self, name,use_matching=False,hybrid=False,match_dir=''):
         self.name = name
-        self.train = TSP(data_dir='./data/TSP', split='train', num_neighbors=25, max_samples=10000) 
-        self.val = TSP(data_dir='./data/TSP', split='val', num_neighbors=25, max_samples=1000)
-        self.test = TSP(data_dir='./data/TSP', split='test', num_neighbors=25, max_samples=1000)
+        self.hybrid = hybrid
+        self.use_matching = use_matching
+        self.match_dir = match_dir
+        
+        if (use_matching or hybrid) and not (self.match_dir):
+            raise Exception('Please indicate a directory containing the 2-matching results')
+        if not (use_matching or hybrid) and self.match_dir:
+            print('WARNING: although a directory for the matching has been specified, no matching will be used.')
+            print('Please specify the correct arguments if this is unwanted.\n')
+        
+        self.train = TSP(name=name, data_dir='./data/TSP', match_dir =self.match_dir, split='train', num_neighbors=25, max_samples=10000,use_matching=use_matching,hybrid=hybrid) 
+        self.val = TSP(name=name, data_dir='./data/TSP', match_dir =self.match_dir, split='val', num_neighbors=25, max_samples=1000,use_matching=use_matching,hybrid=hybrid)
+        self.test = TSP(name=name, data_dir='./data/TSP', match_dir =self.match_dir, split='test', num_neighbors=25, max_samples=1000,use_matching=use_matching,hybrid=hybrid)
         
 
 class TSPDataset(Dataset):

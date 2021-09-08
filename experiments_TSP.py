@@ -15,6 +15,9 @@ import time
 import random
 import glob
 import argparse, json
+import pickle
+
+from csv import DictWriter 
 
 import torch
 import torch.nn as nn
@@ -37,11 +40,15 @@ class DotDict(dict):
 
 
 
+torch.cuda.is_available() #problems with CUDA
+
+
+
+
 """
     IMPORTING CUSTOM MODULES/METHODS
 """
-
-from nets.CSL_graph_classification.load_net import gnn_model # import GNNs
+from nets.TSP_edge_classification.load_net import gnn_model # import all GNNS
 from data.data import LoadData # import dataset
 
 
@@ -67,10 +74,6 @@ def gpu_setup(use_gpu, gpu_id):
 
 
 
-
-
-
-
 """
     VIEWING MODEL CONFIG AND PARAMS
 """
@@ -78,203 +81,206 @@ def view_model_param(MODEL_NAME, net_params):
     model = gnn_model(MODEL_NAME, net_params)
     total_param = 0
     print("MODEL DETAILS:\n")
-    #print(model)
+    print(model)
     for param in model.parameters():
         # print(param.data.size())
         total_param += np.prod(list(param.data.size()))
     print('MODEL/Total parameters:', MODEL_NAME, total_param)
     return total_param
 
+
 """
     TRAINING CODE
 """
 
-def train_val_pipeline(MODEL_NAME, DATASET_NAME, params, net_params, dirs):
-    avg_test_acc = []
-    avg_train_acc = []
-    avg_epochs = []
-
+def train_val_pipeline(MODEL_NAME, dataset, train_size, params, net_params, dirs):
     t0 = time.time()
     per_epoch_time = []
-
-    dataset = LoadData(DATASET_NAME)
-    
-    if MODEL_NAME in ['GCN', 'GAT']:
-        if net_params['self_loop']:
-            print("[!] Adding graph self-loops for GCN/GAT models (central node trick).")
-            dataset._add_self_loops()
-
-    if net_params['pos_enc']:
-        print("[!] Adding graph positional encoding.")
-        dataset._add_positional_encodings(net_params['pos_enc_dim'])
         
+    DATASET_NAME = dataset.name
+    
+    #assert net_params['self_loop'] == False, "No self-loop support for %s dataset" % DATASET_NAME
+    
     trainset, valset, testset = dataset.train, dataset.val, dataset.test
     
+    if type(trainset) == list:
+        trainset = trainset[:train_size]
+    else:
+        trainset = trainset.subsample(train_size)
+
+        
     root_log_dir, root_ckpt_dir, write_file_name, write_config_file = dirs
     device = net_params['device']
     
     # Write the network and optimization hyper-parameters in folder config/
     with open(write_config_file + '.txt', 'w') as f:
         f.write("""Dataset: {},\nModel: {}\n\nparams={}\n\nnet_params={}\n\n\nTotal Parameters: {}\n\n"""                .format(DATASET_NAME, MODEL_NAME, params, net_params, net_params['total_param']))
+        
+    log_dir = os.path.join(root_log_dir, "RUN_" + str(0))
+    writer = SummaryWriter(log_dir=log_dir)
+
+    # setting seeds
+    random.seed(params['seed'])
+    np.random.seed(params['seed'])
+    torch.manual_seed(params['seed'])
+    if device.type == 'cuda':
+        torch.cuda.manual_seed(params['seed'])
+    
+    print("Training Graphs: ", len(trainset))
+    print("Validation Graphs: ", len(valset))
+    print("Test Graphs: ", len(testset))
+    print("Number of Classes: ", net_params['n_classes'])
+
+    model = gnn_model(MODEL_NAME, net_params)
+    model = model.to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=params['init_lr'], weight_decay=params['weight_decay'])
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
+                                                     factor=params['lr_reduce_factor'],
+                                                     patience=params['lr_schedule_patience'],
+                                                     verbose=True)
+    
+    epoch_train_losses, epoch_val_losses = [], []
+    epoch_train_f1s, epoch_val_f1s = [], [] 
+    
+    
+    if MODEL_NAME in ['RingGNN', '3WLGNN']:
+        # import train functions specific for WL-GNNs
+        from train.train_TSP_edge_classification import train_epoch_dense as train_epoch, evaluate_network_dense as evaluate_network
+        from functools import partial # util function to pass edge_feat to collate function
+        
+        train_loader = DataLoader(trainset, shuffle=True, collate_fn=partial(dataset.collate_dense_gnn, edge_feat=net_params['edge_feat']))
+        val_loader = DataLoader(valset, shuffle=False, collate_fn=partial(dataset.collate_dense_gnn, edge_feat=net_params['edge_feat']))
+        test_loader = DataLoader(testset, shuffle=False, collate_fn=partial(dataset.collate_dense_gnn, edge_feat=net_params['edge_feat']))
+
+    else:
+        # import train functions for all other GCNs
+        from train.train_TSP_edge_classification import train_epoch_sparse as train_epoch, evaluate_network_sparse as evaluate_network
+
+        train_loader = DataLoader(trainset, batch_size=params['batch_size'], shuffle=True, collate_fn=dataset.collate)
+        val_loader = DataLoader(valset, batch_size=params['batch_size'], shuffle=False, collate_fn=dataset.collate)
+        test_loader = DataLoader(testset, batch_size=params['batch_size'], shuffle=False, collate_fn=dataset.collate)
+    
     
     # At any point you can hit Ctrl + C to break out of training early.
     try:
-        for split_number in range(5):
-            
-            t0_split = time.time()
-            log_dir = os.path.join(root_log_dir, "RUN_" + str(split_number))
-            writer = SummaryWriter(log_dir=log_dir)
+        with tqdm(range(params['epochs'])) as t:
+            for epoch in t:
 
-            # setting seeds
-            random.seed(params['seed'])
-            np.random.seed(params['seed'])
-            torch.manual_seed(params['seed'])
-            if device.type == 'cuda':
-                torch.cuda.manual_seed(params['seed'])
+                t.set_description('Epoch %d' % epoch)    
 
-            print("RUN NUMBER: ", split_number)
-            trainset, valset, testset = dataset.train[split_number], dataset.val[split_number], dataset.test[split_number]
-            print("Training Graphs: ", len(trainset))
-            print("Validation Graphs: ", len(valset))
-            print("Test Graphs: ", len(testset))
-            print("Number of Classes: ", net_params['n_classes'])
+                start = time.time()
+                
+                if MODEL_NAME in ['RingGNN', '3WLGNN']: # since different batch training function for dense GNNs
+                    epoch_train_loss, epoch_train_f1, optimizer = train_epoch(model, optimizer, device, train_loader, epoch, params['batch_size'])
+                else:   # for all other models common train function
+                    epoch_train_loss, epoch_train_f1, optimizer = train_epoch(model, optimizer, device, train_loader, epoch)
+                
+                epoch_val_loss, epoch_val_f1 = evaluate_network(model, device, val_loader, epoch)
+                _, epoch_test_f1 = evaluate_network(model, device, test_loader, epoch)                        
+                
+                epoch_train_losses.append(epoch_train_loss)
+                epoch_val_losses.append(epoch_val_loss)
+                epoch_train_f1s.append(epoch_train_f1)
+                epoch_val_f1s.append(epoch_val_f1)
 
-            model = gnn_model(MODEL_NAME, net_params)
-            model = model.to(device)
-            optimizer = optim.Adam(model.parameters(), lr=params['init_lr'], weight_decay=params['weight_decay'])
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
-                                                             factor=params['lr_reduce_factor'],
-                                                             patience=params['lr_schedule_patience'],
-                                                             verbose=True)
+                writer.add_scalar('train/_loss', epoch_train_loss, epoch)
+                writer.add_scalar('val/_loss', epoch_val_loss, epoch)
+                writer.add_scalar('train/_f1', epoch_train_f1, epoch)
+                writer.add_scalar('val/_f1', epoch_val_f1, epoch)
+                writer.add_scalar('test/_f1', epoch_test_f1, epoch)
+                writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], epoch)   
 
-            epoch_train_losses, epoch_val_losses = [], []
-            epoch_train_accs, epoch_val_accs = [], [] 
+                
+                t.set_postfix(time=time.time()-start, lr=optimizer.param_groups[0]['lr'],
+                              train_loss=epoch_train_loss, val_loss=epoch_val_loss,
+                              train_f1=epoch_train_f1, val_f1=epoch_val_f1,
+                              test_f1=epoch_test_f1) 
 
-            # batching exception for Diffpool
-            drop_last = True if MODEL_NAME == 'DiffPool' else False
-            # drop_last = False
+                per_epoch_time.append(time.time()-start)
 
-            
-            if MODEL_NAME in ['RingGNN', '3WLGNN']:
-                # import train functions specific for WL-GNNs
-                from train.train_CSL_graph_classification import train_epoch_dense as train_epoch, evaluate_network_dense as evaluate_network
-                from functools import partial # util function to pass pos_enc flag to collate function
+                # Saving checkpoint
+                ckpt_dir = os.path.join(root_ckpt_dir, "RUN_")
+                if not os.path.exists(ckpt_dir):
+                    os.makedirs(ckpt_dir)
+                torch.save(model.state_dict(), '{}.pkl'.format(ckpt_dir + "/epoch_" + str(epoch)))
 
-                train_loader = DataLoader(trainset, shuffle=True, collate_fn=partial(dataset.collate_dense_gnn, pos_enc=net_params['pos_enc']))
-                val_loader = DataLoader(valset, shuffle=False, collate_fn=partial(dataset.collate_dense_gnn, pos_enc=net_params['pos_enc']))
-                test_loader = DataLoader(testset, shuffle=False, collate_fn=partial(dataset.collate_dense_gnn, pos_enc=net_params['pos_enc']))
+                files = glob.glob(ckpt_dir + '/*.pkl')
+                for file in files:
+                    epoch_nb = file.split('_')[-1]
+                    epoch_nb = int(epoch_nb.split('.')[0])
+                    if epoch_nb < epoch-1:
+                        os.remove(file)
 
-            else:
-                # import train functions for all other GCNs
-                from train.train_CSL_graph_classification import train_epoch_sparse as train_epoch, evaluate_network_sparse as evaluate_network
+                scheduler.step(epoch_val_loss)
 
-                train_loader = DataLoader(trainset, batch_size=params['batch_size'], shuffle=True, drop_last=drop_last, collate_fn=dataset.collate)
-                val_loader = DataLoader(valset, batch_size=params['batch_size'], shuffle=False, drop_last=drop_last, collate_fn=dataset.collate)
-                test_loader = DataLoader(testset, batch_size=params['batch_size'], shuffle=False, drop_last=drop_last, collate_fn=dataset.collate)
-
-        
-            with tqdm(range(params['epochs'])) as t:
-                for epoch in t:
-
-                    t.set_description('Epoch %d' % epoch)    
-
-                    start = time.time()
+                if optimizer.param_groups[0]['lr'] < params['min_lr']:
+                    print("\n!! LR EQUAL TO MIN LR SET.")
+                    break
                     
-                    if MODEL_NAME in ['RingGNN', '3WLGNN']: # since different batch training function for dense GNNs
-                        epoch_train_loss, epoch_train_acc, optimizer = train_epoch(model, optimizer, device, train_loader, epoch, params['batch_size'])
-                    else:   # for all other models common train function
-                        epoch_train_loss, epoch_train_acc, optimizer = train_epoch(model, optimizer, device, train_loader, epoch)
-                    
-                    #epoch_train_loss, epoch_train_acc, optimizer = train_epoch(model, optimizer, device, train_loader, epoch)
-                    epoch_val_loss, epoch_val_acc = evaluate_network(model, device, val_loader, epoch)
-
-                    _, epoch_test_acc = evaluate_network(model, device, test_loader, epoch)
-                    
-                    epoch_train_losses.append(epoch_train_loss)
-                    epoch_val_losses.append(epoch_val_loss)
-                    epoch_train_accs.append(epoch_train_acc)
-                    epoch_val_accs.append(epoch_val_acc)
-
-                    writer.add_scalar('train/_loss', epoch_train_loss, epoch)
-                    writer.add_scalar('val/_loss', epoch_val_loss, epoch)
-                    writer.add_scalar('train/_acc', epoch_train_acc, epoch)
-                    writer.add_scalar('val/_acc', epoch_val_acc, epoch)
-                    writer.add_scalar('test/_acc', epoch_test_acc, epoch)
-                    writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], epoch)
-                    
-                    epoch_train_acc = 100.* epoch_train_acc
-                    epoch_test_acc = 100.* epoch_test_acc
-                    
-                    t.set_postfix(time=time.time()-start, lr=optimizer.param_groups[0]['lr'],
-                                  train_loss=epoch_train_loss, val_loss=epoch_val_loss,
-                                  train_acc=epoch_train_acc, val_acc=epoch_val_acc,
-                                  test_acc=epoch_test_acc)  
-
-                    per_epoch_time.append(time.time()-start)
-
-                    # Saving checkpoint
-                    ckpt_dir = os.path.join(root_ckpt_dir, "RUN_" + str(split_number))
-                    if not os.path.exists(ckpt_dir):
-                        os.makedirs(ckpt_dir)
-                    torch.save(model.state_dict(), '{}.pkl'.format(ckpt_dir + "/epoch_" + str(epoch)))
-
-                    files = glob.glob(ckpt_dir + '/*.pkl')
-                    for file in files:
-                        epoch_nb = file.split('_')[-1]
-                        epoch_nb = int(epoch_nb.split('.')[0])
-                        if epoch_nb < epoch-1:
-                            os.remove(file)
-
-                    scheduler.step(epoch_val_loss)
-
-                    if optimizer.param_groups[0]['lr'] < params['min_lr']:
-                        print("\n!! LR EQUAL TO MIN LR SET.")
-                        break
-                        
-                    # Stop training after params['max_time'] hours
-                    if time.time()-t0_split > params['max_time']*3600/10:       # Dividing max_time by 10, since there are 10 runs in TUs
-                        print('-' * 89)
-                        print("Max_time for one train-val-test split experiment elapsed {:.3f} hours, so stopping".format(params['max_time']/10))
-                        break
-
-            _, test_acc = evaluate_network(model, device, test_loader, epoch)   
-            _, train_acc = evaluate_network(model, device, train_loader, epoch)    
-            avg_test_acc.append(test_acc)   
-            avg_train_acc.append(train_acc)
-            avg_epochs.append(epoch)
-
-            print("Test Accuracy [LAST EPOCH]: {:.4f}".format(test_acc))
-            print("Train Accuracy [LAST EPOCH]: {:.4f}".format(train_acc))
+                # Stop training after params['max_time'] hours
+                if time.time()-t0 > params['max_time']*3600:
+                    print('-' * 89)
+                    print("Max_time for training elapsed {:.2f} hours, so stopping".format(params['max_time']))
+                    break
     
     except KeyboardInterrupt:
         print('-' * 89)
         print('Exiting from training early because of KeyboardInterrupt')
-        
     
-    print("TOTAL TIME TAKEN: {:.4f}hrs".format((time.time()-t0)/3600))
+    _, test_f1 = evaluate_network(model, device, test_loader, epoch)
+    _, train_f1 = evaluate_network(model, device, train_loader, epoch)
+    print("Test F1: {:.4f}".format(test_f1))
+    print("Train F1: {:.4f}".format(train_f1))
+    print("Convergence Time (Epochs): {:.4f}".format(epoch))
+    print("TOTAL TIME TAKEN: {:.4f}s".format(time.time()-t0))
     print("AVG TIME PER EPOCH: {:.4f}s".format(np.mean(per_epoch_time)))
-
-    # Final test accuracy value averaged over 5-fold
-    print("""\n\n\nFINAL RESULTS\n\nTEST ACCURACY averaged: {:.4f} with s.d. {:.4f}"""          .format(np.mean(np.array(avg_test_acc))*100, np.std(avg_test_acc)*100))
-    print("\nAll splits Test Accuracies:\n", avg_test_acc)
-    print("""\n\n\nFINAL RESULTS\n\nTRAIN ACCURACY averaged: {:.4f} with s.d. {:.4f}"""          .format(np.mean(np.array(avg_train_acc))*100, np.std(avg_train_acc)*100))
-    print("\nAll splits Train Accuracies:\n", avg_train_acc)
 
     writer.close()
 
     """
-        Write the results in out/results folder
+        Write the results in out_dir/results folder
     """
     with open(write_file_name + '.txt', 'w') as f:
         f.write("""Dataset: {},\nModel: {}\n\nparams={}\n\nnet_params={}\n\n{}\n\nTotal Parameters: {}\n\n
-    FINAL RESULTS\nTEST ACCURACY averaged: {:.3f}\n with test acc s.d. {:.3f}\nTRAIN ACCURACY averaged: {:.3f}\n with train s.d. {:.3f}\n\n
-    Convergence Time (Epochs): {:.3f}\nTotal Time Taken: {:.3f} hrs\nAverage Time Per Epoch: {:.3f} s\n\n\nAll Splits Test Accuracies: {}\n\nAll Splits Train Accuracies: {}"""\
+    FINAL RESULTS\nTEST F1: {:.4f}\nTRAIN F1: {:.4f}\n\n
+    Convergence Time (Epochs): {:.4f}\nTotal Time Taken: {:.4f}hrs\nAverage Time Per Epoch: {:.4f}s\n\n\n"""\
           .format(DATASET_NAME, MODEL_NAME, params, net_params, model, net_params['total_param'],
-                  np.mean(np.array(avg_test_acc))*100, np.std(avg_test_acc)*100,
-                  np.mean(np.array(avg_train_acc))*100, np.std(avg_train_acc)*100, np.mean(np.array(avg_epochs)),
-               (time.time()-t0)/3600, np.mean(per_epoch_time), avg_test_acc, avg_train_acc))
-        
+                  np.mean(np.array(test_f1)), np.mean(np.array(train_f1)), epoch, (time.time()-t0)/3600, np.mean(per_epoch_time)))
+    
+    model_type = 'benchmark'
+    if net_params['in_dim_edge'] == 2:
+        model_type = 'bp_edge_features'
+    if MODEL_NAME == 'GatedGCN-hybrid':
+        model_type = 'hybrid'
 
+
+    """
+        Write the key metrics in .csv file, together with the other experiments
+    """
+    fields = ['dataset','model_type','training_size','test_f1','train_f1','epochs','tot_time','time_per_epoch']
+
+    d = {'dataset': DATASET_NAME, 'model_type': model_type,'training_size':train_size,'test_f1':np.round(np.mean(np.array(test_f1)),4),
+    'train_f1':np.round(np.mean(np.array(train_f1)),4),'epochs':epoch,'tot_time':np.round((time.time()-t0)/3600,4),
+    'time_per_epoch':np.round(np.mean(per_epoch_time),4)}
+
+    res = 'hybrid' if model_type == 'hybrid' else 'base'
+
+
+    seed = params['seed']
+    
+    res_dir = 'experiment_results'
+    
+    if not os.path.exists(res_dir):
+        os.makedirs(res_dir)
+    
+    with open(f'{res_dir}/{res}_model_seed{seed}.csv', 'a') as f:
+      
+        dictwriter_object = DictWriter(f, fieldnames=fields)
+  
+        dictwriter_object.writerow(d)
+  
+        f.close()
 
 
 
@@ -310,7 +316,7 @@ def main():
     parser.add_argument('--gated', help="Please give a value for gated")
     parser.add_argument('--in_feat_dropout', help="Please give a value for in_feat_dropout")
     parser.add_argument('--dropout', help="Please give a value for dropout")
-    parser.add_argument('--graph_norm', help="Please give a value for graph_norm")
+    parser.add_argument('--layer_norm', help="Please give a value for layer_norm")
     parser.add_argument('--batch_norm', help="Please give a value for batch_norm")
     parser.add_argument('--sage_aggregator', help="Please give a value for sage_aggregator")
     parser.add_argument('--data_mode', help="Please give a value for data_mode")
@@ -322,7 +328,8 @@ def main():
     parser.add_argument('--cat', help="Please give a value for cat")
     parser.add_argument('--self_loop', help="Please give a value for self_loop")
     parser.add_argument('--max_time', help="Please give a value for max_time")
-    parser.add_argument('--pos_enc_dim', help="Please give a value for pos_enc_dim")
+    parser.add_argument('--layer_type', help="Please give a value for layer_type (for GAT and GatedGCN only)")
+    parser.add_argument('--train_size',help='Please specify size of training set to be used')
     args = parser.parse_args()
     with open(args.config) as f:
         config = json.load(f)
@@ -395,8 +402,8 @@ def main():
         net_params['in_feat_dropout'] = float(args.in_feat_dropout)
     if args.dropout is not None:
         net_params['dropout'] = float(args.dropout)
-    if args.graph_norm is not None:
-        net_params['graph_norm'] = True if args.graph_norm=='True' else False
+    if args.layer_norm is not None:
+        net_params['layer_norm'] = True if args.layer_norm=='True' else False
     if args.batch_norm is not None:
         net_params['batch_norm'] = True if args.batch_norm=='True' else False
     if args.sage_aggregator is not None:
@@ -417,32 +424,22 @@ def main():
         net_params['cat'] = True if args.cat=='True' else False
     if args.self_loop is not None:
         net_params['self_loop'] = True if args.self_loop=='True' else False
-    if args.pos_enc_dim is not None:
-        net_params['pos_enc_dim'] = int(args.pos_enc_dim)
-        
-        
-      
+    if args.layer_type is not None:
+        net_params['layer_type'] = layer_type
     
-    # CSL
-    net_params['num_node_type'] = dataset.all.num_node_type
-    net_params['num_edge_type'] = dataset.all.num_edge_type
-    num_classes = len(np.unique(dataset.all.graph_labels))
+    # TSP
+    net_params['in_dim'] = dataset.train[0][0].ndata['feat'][0].shape[0]
+    net_params['in_dim_edge'] = dataset.train[0][0].edata['feat'][0].size(0)
+    num_classes = len(np.unique(np.concatenate([i[1] for i in dataset.train])))
     net_params['n_classes'] = num_classes
+
+    # EXPERIMENTS
+    train_size = int(args.train_size)
     
-    # RingGNN
     if MODEL_NAME == 'RingGNN':
-        num_nodes_train = [dataset.train[0][i][0].number_of_nodes() for i in range(len(dataset.train))]
-        num_nodes_test = [dataset.test[0][i][0].number_of_nodes() for i in range(len(dataset.test))]
-        num_nodes = num_nodes_train + num_nodes_test
+        num_nodes = [dataset.train[i][0].number_of_nodes() for i in range(len(dataset.train))]
         net_params['avg_node_num'] = int(np.ceil(np.mean(num_nodes)))
-        
-    # RingGNN, 3WLGNN
-    if MODEL_NAME in ['RingGNN', '3WLGNN']:
-        if net_params['pos_enc']:
-            net_params['in_dim'] = net_params['pos_enc_dim']
-        else:
-            net_params['in_dim'] = 1
-            
+    
     root_log_dir = out_dir + 'logs/' + MODEL_NAME + "_" + DATASET_NAME + "_GPU" + str(config['gpu']['id']) + "_" + time.strftime('%Hh%Mm%Ss_on_%b_%d_%Y')
     root_ckpt_dir = out_dir + 'checkpoints/' + MODEL_NAME + "_" + DATASET_NAME + "_GPU" + str(config['gpu']['id']) + "_" + time.strftime('%Hh%Mm%Ss_on_%b_%d_%Y')
     write_file_name = out_dir + 'results/result_' + MODEL_NAME + "_" + DATASET_NAME + "_GPU" + str(config['gpu']['id']) + "_" + time.strftime('%Hh%Mm%Ss_on_%b_%d_%Y')
@@ -456,10 +453,9 @@ def main():
         os.makedirs(out_dir + 'configs')
 
     net_params['total_param'] = view_model_param(MODEL_NAME, net_params)
-    train_val_pipeline(MODEL_NAME, DATASET_NAME, params, net_params, dirs)
+    train_val_pipeline(MODEL_NAME, dataset, train_size, params, net_params, dirs)
 
     
-
     
     
     
@@ -467,6 +463,16 @@ def main():
     
     
 main()    
+
+
+
+
+
+
+
+
+
+
 
 
 

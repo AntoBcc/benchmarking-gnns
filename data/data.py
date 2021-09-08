@@ -1,13 +1,13 @@
 """
     File to load dataset based on user control from main file
 """
-from data.superpixels import SuperPixDataset
-from data.molecules import MoleculeDataset
-from data.TUs import TUsDataset
-from data.SBMs import SBMsDataset
+# from data.superpixels import SuperPixDataset
+# from data.molecules import MoleculeDataset
+# from data.TUs import TUsDataset
+# from data.SBMs import SBMsDataset
 from data.TSP import TSPDataset
-from data.COLLAB import COLLABDataset
-from data.CSL import CSLDataset
+# from data.COLLAB import COLLABDataset
+# from data.CSL import CSLDataset
 
 
 def LoadData(DATASET_NAME):
@@ -35,7 +35,7 @@ def LoadData(DATASET_NAME):
         return SBMsDataset(DATASET_NAME)
     
     # handling for TSP dataset
-    if DATASET_NAME == 'TSP':
+    if DATASET_NAME.lower().startswith('tsp'):
         return TSPDataset(DATASET_NAME)
 
     # handling for COLLAB dataset
